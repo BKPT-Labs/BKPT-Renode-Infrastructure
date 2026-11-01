@@ -33,9 +33,15 @@ namespace Antmicro.Renode.Utilities
             this.serverName = serverName;
         }
 
+        /// <summary>
+        /// The address servers started after this is set listen on. All interfaces by default; a
+        /// debug session sets the loopback address so its GDB server is not reachable from the network.
+        /// </summary>
+        public static IPAddress ListenAddress { get; set; } = IPAddress.Any;
+
         public void Start(int port)
         {
-            server = SocketsManager.Instance.AcquireSocket(null, AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp, new IPEndPoint(IPAddress.Any, port), listeningBacklog: 1, nameAppendix: this.serverName);
+            server = SocketsManager.Instance.AcquireSocket(null, AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp, new IPEndPoint(ListenAddress, port), listeningBacklog: 1, nameAppendix: this.serverName);
 
             listenerThread = new Thread(ListenerThreadBody)
             {

@@ -48,6 +48,46 @@ namespace Antmicro.Renode.UI
                 return false;
             }
 
+            if(DebugSession)
+            {
+                if(string.IsNullOrEmpty(Elf) || GdbPort < 1 || GdbPort > 65535)
+                {
+                    error = "--model needs --elf and a --gdb-port between 1 and 65535";
+                    return false;
+                }
+                if(MemoryPort == 0 || MemoryPort > 65535 || MemoryPort == GdbPort)
+                {
+                    error = "--memory-port must be between 1 and 65535 and differ from --gdb-port";
+                    return false;
+                }
+                if(Console || UI || ServerMode || Port != null || FilePath != null || (Execute != null && Execute.Length > 0)
+                    || RobotFrameworkRemoteServerPort != -1 || RobotDebug)
+                {
+                    error = "--model runs a debug session on its own; drop --console, --ui, --server-mode, --port, --robot-server-port, --robot-debug-on-error, -e and the script file";
+                    return false;
+                }
+                // Resolved now: starting the Monitor later changes the working directory.
+                try
+                {
+                    Elf = System.IO.Path.GetFullPath(Elf);
+                }
+                catch(System.Exception e) when(e is System.ArgumentException || e is System.NotSupportedException || e is System.IO.PathTooLongException)
+                {
+                    error = $"--elf: {e.Message}";
+                    return false;
+                }
+                // A debug session is driven through GDB and the memory port only: no monitor
+                // window and no monitor socket (which would otherwise default to port 1234).
+                DisableXwt = true;
+                HideMonitor = true;
+                Port = -1;
+            }
+            else if(Elf != null || GdbPort != -1 || MemoryPort != -1)
+            {
+                error = "--elf, --gdb-port and --memory-port need --model";
+                return false;
+            }
+
             error = null;
             return true;
         }
@@ -93,6 +133,26 @@ namespace Antmicro.Renode.UI
 
         [Name('v', "version"), DefaultValue(false), Description("Print version and exit.")]
         public bool Version { get; set; }
+
+        [Name("model"), Description("Start a debug session on this model (a name from --list-models). Needs --elf and --gdb-port.")]
+        public string Model { get; set; }
+
+        [Name("elf"), Description("Debug session: the firmware ELF to load. Taken as given, so paths with spaces work.")]
+        public string Elf { get; set; }
+
+        [Name("gdb-port"), DefaultValue(-1), Description("Debug session: GDB server port on 127.0.0.1.")]
+        public int GdbPort { get; set; }
+
+        [Name("memory-port"), DefaultValue(-1), Description("Debug session: optional live memory port on 127.0.0.1 (one request per line: 'r <addr> <len>', 'w <addr> <hex>').")]
+        public int MemoryPort { get; set; }
+
+        [Name("list-models"), DefaultValue(false), Description("Print the models a debug session supports as a JSON array and exit.")]
+        public bool ListModels { get; set; }
+
+        [Name("include-incomplete"), DefaultValue(false), Description("With --list-models, also list models known to be incomplete.")]
+        public bool IncludeIncomplete { get; set; }
+
+        public bool DebugSession => Model != null;
 
         [Name("console"), Description("Run the Monitor in the console instead of a separate window")]
         public bool Console { get; set; }

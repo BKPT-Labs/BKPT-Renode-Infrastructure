@@ -35,6 +35,12 @@ namespace Antmicro.Renode.UI
                 EmulationManager.DisableEmulationFilesCleanup = true;
             }
 
+            if(options.DebugSession)
+            {
+                // A debugger front end reads the console line by line: errors only,
+                // set before any machine or plugin can log.
+                ConsoleBackend.Instance.SetLogLevel(LogLevel.Error);
+            }
             if(!options.HideLog)
             {
                 Logger.AddBackend(ConsoleBackend.Instance, "console");

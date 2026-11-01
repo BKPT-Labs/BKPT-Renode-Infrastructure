@@ -100,6 +100,7 @@ namespace Antmicro.Renode
             if(!disposed)
             {
                 disposed = true;
+                BeforeDispose?.Invoke();
                 EmulationManager.Instance.Clear();
                 TypeManager.Instance.Dispose();
                 Logger.Dispose();
@@ -151,6 +152,12 @@ namespace Antmicro.Renode
         private static readonly BlockingCollection<Action> actionsOnMainThread = new BlockingCollection<Action>();
 
         public static event Action BeforeExit;
+
+        /// <summary>
+        /// Raised once just before the emulation and its machines are disposed: a server that
+        /// reaches machine memory from its own threads stops and drains here.
+        /// </summary>
+        public static event Action BeforeDispose;
 
         public static event Action EnableGUI;
 
