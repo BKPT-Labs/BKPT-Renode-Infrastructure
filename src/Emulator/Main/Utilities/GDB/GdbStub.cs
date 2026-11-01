@@ -223,7 +223,6 @@ namespace Antmicro.Renode.Utilities.GDB
             {
                 // If we got here, and the CPU doesn't support Gdb (ICpuSupportingGdb) something went seriously wrong - this is GdbStub after all
                 var cpuSupportingGdb = (ICpuSupportingGdb)args.Cpu;
-                ranDuringConnection.Add(cpuSupportingGdb);
 
                 // We only should send one stop response to Gdb in all-stop mode
                 bool sendStopResponse = cpuSupportingGdb == stopReplyingCpu || stopReplyingCpu == null;
@@ -296,6 +295,7 @@ namespace Antmicro.Renode.Utilities.GDB
             commandsManager.CanAttachCPU = false;
             foreach(var cpu in commandsManager.ManagedCpus)
             {
+                markersAtConnection[cpu] = cpu.ExecutionMarker;
                 cpu.Halted += OnHalted;
                 modesBeforeConnection[cpu] = cpu.ExecutionMode;
                 cpu.ExecutionMode = ExecutionMode.SingleStep;
@@ -308,27 +308,31 @@ namespace Antmicro.Renode.Utilities.GDB
             foreach(var cpu in commandsManager.ManagedCpus)
             {
                 cpu.Halted -= OnHalted;
-                // A CPU that was held in single-step before this connection and
-                // that the connection never ran stays held: a client that
-                // connects and leaves (a port probe, a failed attach) must not
-                // start a target that is waiting for its debugger. Any halt
-                // during the connection means it ran, and closing resumes it.
+                // A CPU that was held in single-step before this connection
+                // and that executed nothing during it stays held: a client
+                // that connects and leaves (a port probe, a failed attach, a
+                // reset that holds the CPUs again) must not start a target
+                // that is waiting for its debugger. A CPU that ran or stepped,
+                // through GDB or a monitor command, resumes as before. Halts
+                // are no evidence: starting a held CPU reports a step halt
+                // before it executes anything.
                 var stillHeld = modesBeforeConnection.TryGetValue(cpu, out var before)
                     && before == ExecutionMode.SingleStep
                     && cpu.ExecutionMode == ExecutionMode.SingleStep
-                    && !ranDuringConnection.Contains(cpu);
+                    && markersAtConnection.TryGetValue(cpu, out var marker)
+                    && cpu.ExecutionMarker == marker;
                 cpu.ExecutionMode = stillHeld ? ExecutionMode.SingleStep : ExecutionMode.Continuous;
                 cpu.DebuggerConnected = false;
             }
             modesBeforeConnection.Clear();
-            ranDuringConnection.Clear();
+            markersAtConnection.Clear();
             commandsManager.CanAttachCPU = true;
         }
 
         private ICpuSupportingGdb stopReplyingCpu;
         private bool disconnectedState;
         private readonly Dictionary<ICpuSupportingGdb, ExecutionMode> modesBeforeConnection = new Dictionary<ICpuSupportingGdb, ExecutionMode>();
-        private readonly HashSet<ICpuSupportingGdb> ranDuringConnection = new HashSet<ICpuSupportingGdb>();
+        private readonly Dictionary<ICpuSupportingGdb, ulong> markersAtConnection = new Dictionary<ICpuSupportingGdb, ulong>();
 
         private readonly PacketBuilder pcktBuilder;
         private readonly IEnumerable<ICpuSupportingGdb> cpus;

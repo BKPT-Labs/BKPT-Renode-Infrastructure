@@ -337,6 +337,14 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         public abstract ulong ExecutedInstructions { get; }
 
+        /// <summary>
+        /// Grows each time this CPU is given instructions to execute (it runs, or steps) and, unlike
+        /// <see cref="ExecutedInstructions"/>, is not cleared by a reset: two readings that differ mean
+        /// the CPU ran in between. It grows before the execution starts, so a halt reported during the
+        /// execution already sees the new value.
+        /// </summary>
+        public ulong ExecutionMarker => Interlocked.Read(ref executionMarker);
+
         public abstract RegisterValue PC { get; set; }
 
         public abstract string Architecture { get; }
@@ -791,6 +799,9 @@ namespace Antmicro.Renode.Peripherals.CPU
                     {
                         this.Trace($"Asking CPU to execute {toExecute} instructions");
 
+                        // Published first: breakpoints and watchpoints report their halt from
+                        // inside ExecuteInstructions.
+                        Interlocked.Increment(ref executionMarker);
                         result = ExecuteInstructions(toExecute, out var executed);
                         this.Trace($"CPU executed {executed} instructions and returned {result}");
                         machine.Profiler?.Log(new InstructionEntry(machine.SystemBus.GetCPUSlot(this), ExecutedInstructions));
@@ -1022,6 +1033,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         }
 
         private ulong skipInstructions;
+        private ulong executionMarker;
 
         [Transient]
         private volatile bool pauseLockTimeHandleMarker;
