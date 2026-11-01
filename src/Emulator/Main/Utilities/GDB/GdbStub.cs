@@ -223,6 +223,7 @@ namespace Antmicro.Renode.Utilities.GDB
             {
                 // If we got here, and the CPU doesn't support Gdb (ICpuSupportingGdb) something went seriously wrong - this is GdbStub after all
                 var cpuSupportingGdb = (ICpuSupportingGdb)args.Cpu;
+                ranDuringConnection.Add(cpuSupportingGdb);
 
                 // We only should send one stop response to Gdb in all-stop mode
                 bool sendStopResponse = cpuSupportingGdb == stopReplyingCpu || stopReplyingCpu == null;
@@ -296,6 +297,7 @@ namespace Antmicro.Renode.Utilities.GDB
             foreach(var cpu in commandsManager.ManagedCpus)
             {
                 cpu.Halted += OnHalted;
+                modesBeforeConnection[cpu] = cpu.ExecutionMode;
                 cpu.ExecutionMode = ExecutionMode.SingleStep;
                 cpu.DebuggerConnected = true;
             }
@@ -306,14 +308,27 @@ namespace Antmicro.Renode.Utilities.GDB
             foreach(var cpu in commandsManager.ManagedCpus)
             {
                 cpu.Halted -= OnHalted;
-                cpu.ExecutionMode = ExecutionMode.Continuous;
+                // A CPU that was held in single-step before this connection and
+                // that the connection never ran stays held: a client that
+                // connects and leaves (a port probe, a failed attach) must not
+                // start a target that is waiting for its debugger. Any halt
+                // during the connection means it ran, and closing resumes it.
+                var stillHeld = modesBeforeConnection.TryGetValue(cpu, out var before)
+                    && before == ExecutionMode.SingleStep
+                    && cpu.ExecutionMode == ExecutionMode.SingleStep
+                    && !ranDuringConnection.Contains(cpu);
+                cpu.ExecutionMode = stillHeld ? ExecutionMode.SingleStep : ExecutionMode.Continuous;
                 cpu.DebuggerConnected = false;
             }
+            modesBeforeConnection.Clear();
+            ranDuringConnection.Clear();
             commandsManager.CanAttachCPU = true;
         }
 
         private ICpuSupportingGdb stopReplyingCpu;
         private bool disconnectedState;
+        private readonly Dictionary<ICpuSupportingGdb, ExecutionMode> modesBeforeConnection = new Dictionary<ICpuSupportingGdb, ExecutionMode>();
+        private readonly HashSet<ICpuSupportingGdb> ranDuringConnection = new HashSet<ICpuSupportingGdb>();
 
         private readonly PacketBuilder pcktBuilder;
         private readonly IEnumerable<ICpuSupportingGdb> cpus;
