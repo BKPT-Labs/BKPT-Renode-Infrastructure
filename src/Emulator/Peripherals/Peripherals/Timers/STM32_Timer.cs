@@ -21,7 +21,7 @@ namespace Antmicro.Renode.Peripherals.Timers
 {
     // This class does not implement advanced-control timers interrupts
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
-    public class STM32_Timer : LimitTimer, IDoubleWordPeripheral, IKnownSize, INumberedGPIOOutput, IRegisterablePeripheral<IGPIOReceiver, NumberRegistrationPoint<int>>, IRegisterablePeripheral<IGPIOReceiver, NullRegistrationPoint>, IGPIOReceiver
+    public class STM32_Timer : LimitTimer, IHasFrequency, IDoubleWordPeripheral, IKnownSize, INumberedGPIOOutput, IRegisterablePeripheral<IGPIOReceiver, NumberRegistrationPoint<int>>, IRegisterablePeripheral<IGPIOReceiver, NullRegistrationPoint>, IGPIOReceiver
     {
         public STM32_Timer(IMachine machine, ulong frequency, uint initialLimit) : base(machine.ClockSource, frequency, limit: initialLimit, direction: Direction.Ascending, enabled: false, eventEnabled: true, autoUpdate: false)
         {
@@ -565,7 +565,23 @@ namespace Antmicro.Renode.Peripherals.Timers
             {
                 channels[i].Reset();
             }
+            if(suppliedFrequency != 0)
+            {
+                ApplyFrequency(suppliedFrequency);
+            }
             UpdateInterrupts();
+        }
+
+        // An RCC supplies the input clock through IHasFrequency. It also clocks
+        // the capture/compare channels, and a reset of this timer keeps it.
+        ulong IHasFrequency.Frequency
+        {
+            get => Frequency;
+            set
+            {
+                suppliedFrequency = value;
+                ApplyFrequency(value);
+            }
         }
 
         [DefaultInterrupt]
@@ -584,6 +600,15 @@ namespace Antmicro.Renode.Peripherals.Timers
         public IReadOnlyDictionary<int, IGPIO> Connections => connections;
 
         public long Size => 0x400;
+
+        private void ApplyFrequency(ulong value)
+        {
+            Frequency = value;
+            for(var i = 0; i < NumberOfCCChannels; ++i)
+            {
+                channels[i].Timer.Frequency = value;
+            }
+        }
 
         private static int InputPrescalerDivider(InputPrescaler p)
         {
@@ -778,6 +803,7 @@ namespace Antmicro.Renode.Peripherals.Timers
         private uint repetitionsLeft;
         private bool updateInterruptFlag;
         private bool enableRequested;
+        private ulong suppliedFrequency;
 
         private readonly uint initialLimit;
         private readonly int timerCounterLengthInBits;

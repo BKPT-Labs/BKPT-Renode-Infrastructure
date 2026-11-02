@@ -6,19 +6,37 @@
 //
 
 using System.Collections.Generic;
+using System.Linq;
 
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Core.Structure;
 using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Exceptions;
+using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.Timers;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
-    public sealed class STM32F4_RCC : IDoubleWordPeripheral, IKnownSize, IProvidesRegisterCollection<DoubleWordRegisterCollection>
+    public sealed class STM32F4_RCC : IDoubleWordPeripheral, IKnownSize, IProvidesRegisterCollection<DoubleWordRegisterCollection>,
+        IRegisterablePeripheral<IPeripheral, EnumRegistrationPoint<STM32F4_RCC.TimerClock>>
     {
-        public STM32F4_RCC(IMachine machine, STM32F4_RTC rtcPeripheral)
+        // systick and the timers registered here follow the clock tree the
+        // firmware programs (SYSCLK source, PLL, AHB and APB prescalers,
+        // TIMPRE). hseFrequency is board data (the default is the 8 MHz that
+        // ST's Discovery and Nucleo boards provide); pllRSystemClock marks the
+        // parts on which SW=3 selects PLLR (F410/F412/F413/F446).
+        public STM32F4_RCC(IMachine machine, STM32F4_RTC rtcPeripheral, IHasDivisibleFrequency systick = null,
+            ulong hseFrequency = DefaultHseFrequency, bool pllRSystemClock = false)
         {
+            if(hseFrequency == 0)
+            {
+                throw new ConstructionException($"{nameof(hseFrequency)} has to be greater than zero");
+            }
+            this.systick = systick;
+            this.hseFrequency = hseFrequency;
+            this.pllRSystemClock = pllRSystemClock;
             // Renode, in general, does not include clock control peripherals.
             // While this is doable, it seldom benefits real software development
             // and is very cumbersome to maintain.
@@ -31,7 +49,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // Usually we implemented this logic with Python peripherals.
             //
             // Keep in mind that most of these registers do not affect other
-            // peripherals or their clocks.
+            // peripherals or their clocks. The exception is the clock tree
+            // (ClockControl, PLLConfiguration, ClockConfiguration and TIMPRE),
+            // which drives systick and the registered timers.
             var registersMap = new Dictionary<long, DoubleWordRegister>
             {
                 {(long)Registers.ClockControl, new DoubleWordRegister(this, 0x483)
@@ -52,31 +72,36 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     .WithFlag(28, out var pllsaion, name: "PLLSAION")
                     .WithFlag(29, FieldMode.Read, valueProviderCallback: _ => pllsaion.Value, name: "PLLSAIRDY")
                     .WithReservedBits(30, 2)
+                    .WithWriteCallback((_, __) => UpdateClocks())
                 },
                 {(long)Registers.PLLConfiguration, new DoubleWordRegister(this, 0x24003010)
-                    .WithValueField(0, 6, name: "PLLM")
-                    .WithValueField(6, 9, name: "PLLN")
+                    .WithValueField(0, 6, out pllM, name: "PLLM")
+                    .WithValueField(6, 9, out pllN, name: "PLLN")
                     .WithReservedBits(15, 1)
-                    .WithValueField(16, 2, name: "PLLP")
+                    .WithValueField(16, 2, out pllP, name: "PLLP")
                     .WithReservedBits(18, 4)
-                    .WithValueField(22, 1, name: "PLLSRC")
+                    .WithFlag(22, out pllSourceHse, name: "PLLSRC")
                     .WithReservedBits(23, 1)
                     .WithValueField(24, 4, name: "PLLQ")
-                    .WithReservedBits(28, 4)
+                    // PLLR exists on the F410/F412/F413/F446 and F76x/F77x
+                    .WithValueField(28, 3, out pllR, name: "PLLR")
+                    .WithReservedBits(31, 1)
+                    .WithWriteCallback((_, __) => UpdateClocks())
                 },
                 {(long)Registers.ClockConfiguration, new DoubleWordRegister(this)
-                    .WithValueField(0, 2, out var systemClockSwitch, name: "SW")
+                    .WithValueField(0, 2, out systemClockSwitch, name: "SW")
                     .WithValueField(2, 2, FieldMode.Read, name: "SWS", valueProviderCallback: _ => systemClockSwitch.Value)
-                    .WithValueField(4, 4, name: "HPRE")
+                    .WithValueField(4, 4, out ahbPrescaler, name: "HPRE")
                     .WithReservedBits(8, 2)
-                    .WithValueField(10, 3, name: "PPRE1")
-                    .WithValueField(13, 3, name: "PPRE2")
+                    .WithValueField(10, 3, out apb1Prescaler, name: "PPRE1")
+                    .WithValueField(13, 3, out apb2Prescaler, name: "PPRE2")
                     .WithValueField(16, 5, name: "RTCPRE")
                     .WithValueField(21, 2, name: "MCO1")
                     .WithValueField(23, 1, name: "I2SSCR")
                     .WithValueField(24, 3, name: "MCO1PRE")
                     .WithValueField(27, 3, name: "MCO2PRE")
                     .WithValueField(30, 2, name: "MCO2")
+                    .WithWriteCallback((_, __) => UpdateClocks())
                 },
                 //ClockInterrupt not implemented
                 {(long)Registers.AHB1PeripheralReset, new DoubleWordRegister(this)
@@ -338,12 +363,36 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     .WithReservedBits(18, 2)
                     .WithValueField(20, 2, name: "SAI1ASRC")
                     .WithValueField(22, 2, name: "SAI1BSRC")
-                    .WithFlag(24, name: "TIMPRE")
+                    .WithFlag(24, out timerPrescalerSelection, name: "TIMPRE")
                     .WithReservedBits(25, 7)
+                    .WithWriteCallback((_, __) => UpdateClocks())
                 },
             };
 
             RegistersCollection = new DoubleWordRegisterCollection(this, registersMap);
+            UpdateClocks();
+        }
+
+        public void Register(IPeripheral peripheral, EnumRegistrationPoint<TimerClock> registrationPoint)
+        {
+            if(!(peripheral is IHasFrequency timer))
+            {
+                throw new RegistrationException($"{peripheral.GetType().Name} has no frequency for the RCC to drive.");
+            }
+            if(timers.Any(registered => registered.Timer == timer))
+            {
+                throw new RegistrationException("Cannot register the same device twice.");
+            }
+            timers.Add(new RegisteredTimer(timer, registrationPoint.Name));
+            UpdateClocks();
+        }
+
+        public void Unregister(IPeripheral peripheral)
+        {
+            if(timers.RemoveAll(registered => registered.Timer == peripheral as IHasFrequency) == 0)
+            {
+                throw new RegistrationException("Trying to unregister not registered device.");
+            }
         }
 
         public uint ReadDoubleWord(long offset)
@@ -360,6 +409,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         {
             RegistersCollection.Reset();
             Timer9Reset.Unset();
+            UpdateClocks();
         }
 
         public long Size => 0x400;
@@ -368,8 +418,157 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         // Workaround so we don't have to pass through the constructor;
         // Will be removed after we refactor this model and
-        // introduce a clean solution for resetting peripherals; 
+        // introduce a clean solution for resetting peripherals;
         public GPIO Timer9Reset { get; } = new GPIO();
+
+        public enum TimerClock
+        {
+            APB1,
+            APB2,
+        }
+
+        private void UpdateClocks()
+        {
+            if(systick == null && timers.Count == 0)
+            {
+                return;
+            }
+            if(!TryGetSystemClock(out var sysclk))
+            {
+                return;
+            }
+
+            var hclk = sysclk / AhbDivider(ahbPrescaler.Value);
+            if(systick != null)
+            {
+                // The NVIC model clocks SysTick from the processor clock (CLKSOURCE reads 1)
+                SetFrequency(systick, hclk, "systick");
+            }
+            foreach(var registered in timers)
+            {
+                var apbDivider = ApbDivider(registered.Bus == TimerClock.APB1 ? apb1Prescaler.Value : apb2Prescaler.Value);
+                SetFrequency(registered.Timer, TimerFrequency(hclk, apbDivider), registered.Bus.ToString());
+            }
+        }
+
+        private bool TryGetSystemClock(out ulong frequency)
+        {
+            frequency = 0;
+            ulong vco;
+            switch(systemClockSwitch.Value)
+            {
+            case 0:
+                frequency = HsiFrequency;
+                return true;
+            case 1:
+                frequency = hseFrequency;
+                return true;
+            case 2:
+                if(!TryGetPllVcoFrequency(out vco))
+                {
+                    return false;
+                }
+                frequency = vco / (2 * (pllP.Value + 1));
+                return true;
+            default:
+                if(!pllRSystemClock)
+                {
+                    this.Log(LogLevel.Warning, "SW=3 is not a system clock on this part; clocks left unchanged");
+                    return false;
+                }
+                if(pllR.Value < 2)
+                {
+                    this.Log(LogLevel.Warning, "SYSCLK selects PLLR with PLLR={0}; clocks left unchanged", pllR.Value);
+                    return false;
+                }
+                if(!TryGetPllVcoFrequency(out vco))
+                {
+                    return false;
+                }
+                frequency = vco / pllR.Value;
+                return true;
+            }
+        }
+
+        private bool TryGetPllVcoFrequency(out ulong frequency)
+        {
+            frequency = 0;
+            if(pllM.Value < 2 || pllN.Value < 2)
+            {
+                this.Log(LogLevel.Warning, "SYSCLK selects the PLL with PLLM={0}, PLLN={1}; clocks left unchanged", pllM.Value, pllN.Value);
+                return false;
+            }
+            var input = pllSourceHse.Value ? hseFrequency : HsiFrequency;
+            frequency = input * pllN.Value / pllM.Value;
+            return true;
+        }
+
+        private ulong TimerFrequency(ulong hclk, ulong apbDivider)
+        {
+            if(apbDivider == 1)
+            {
+                return hclk;
+            }
+            if(timerPrescalerSelection.Value)
+            {
+                // TIMPRE: HCLK up to an APB divider of 4, else 4 x PCLK
+                return apbDivider <= 4 ? hclk : hclk * 4 / apbDivider;
+            }
+            return hclk * 2 / apbDivider;
+        }
+
+        private void SetFrequency(IHasFrequency target, ulong frequency, string name)
+        {
+            if(frequency == 0 || target.Frequency == frequency)
+            {
+                return;
+            }
+            this.Log(LogLevel.Debug, "{0} clock changed from {1} Hz to {2} Hz", name, target.Frequency, frequency);
+            target.Frequency = frequency;
+        }
+
+        private static ulong AhbDivider(ulong hpre)
+        {
+            // 0xxx: not divided; 1000..1111: 2, 4, 8, 16, 64, 128, 256, 512
+            return hpre < 8 ? 1UL : hpre < 12 ? 1UL << (int)(hpre - 7) : 1UL << (int)(hpre - 6);
+        }
+
+        private static ulong ApbDivider(ulong ppre)
+        {
+            // 0xx: not divided; 100..111: 2, 4, 8, 16
+            return ppre < 4 ? 1UL : 1UL << (int)(ppre - 3);
+        }
+
+        private readonly IHasDivisibleFrequency systick;
+        private readonly ulong hseFrequency;
+        private readonly bool pllRSystemClock;
+        private readonly List<RegisteredTimer> timers = new List<RegisteredTimer>();
+
+        private IValueRegisterField pllM;
+        private IValueRegisterField pllN;
+        private IValueRegisterField pllP;
+        private IValueRegisterField pllR;
+        private IFlagRegisterField pllSourceHse;
+        private IValueRegisterField systemClockSwitch;
+        private IValueRegisterField ahbPrescaler;
+        private IValueRegisterField apb1Prescaler;
+        private IValueRegisterField apb2Prescaler;
+        private IFlagRegisterField timerPrescalerSelection;
+
+        private const ulong HsiFrequency = 16000000;
+        private const ulong DefaultHseFrequency = 8000000;
+
+        private struct RegisteredTimer
+        {
+            public RegisteredTimer(IHasFrequency timer, TimerClock bus)
+            {
+                Timer = timer;
+                Bus = bus;
+            }
+
+            public IHasFrequency Timer { get; }
+            public TimerClock Bus { get; }
+        }
 
         private enum Registers
         {

@@ -208,7 +208,7 @@ namespace Antmicro.Renode.Peripherals.Timers
                     throw new ArgumentException("Divider must be greater than 0");
                 }
                 divider = value;
-                var effectiveFrequency = Frequency / divider;
+                var effectiveFrequency = EffectiveFrequency;
                 clockSource.ExchangeClockEntryWith(OnLimitReached, oldEntry => oldEntry.With(frequency: effectiveFrequency));
 
                 RequestReturnOnCurrentCpu();
@@ -262,7 +262,7 @@ namespace Antmicro.Renode.Peripherals.Timers
                     throw new ArgumentException("Frequency must be greater than 0");
                 }
                 frequency = value;
-                var effectiveFrequency = frequency / Divider;
+                var effectiveFrequency = EffectiveFrequency;
                 clockSource.ExchangeClockEntryWith(OnLimitReached, oldEntry => oldEntry.With(frequency: effectiveFrequency));
 
                 RequestReturnOnCurrentCpu();
@@ -319,12 +319,17 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
         }
 
+        // A clock entry holds a whole frequency: an input clock below the divider
+        // (possible once an RCC drives the input) runs at 1 Hz instead of 0 Hz,
+        // which the clock source cannot divide by.
+        private ulong EffectiveFrequency => Math.Max(1UL, frequency / divider);
+
         private void InternalReset()
         {
             frequency = initialFrequency;
             divider = initialDivider;
 
-            var clockEntry = new ClockEntry(initialLimit,  frequency / divider, OnLimitReached, owner, localName, initialEnabled, initialDirection, initialWorkMode)
+            var clockEntry = new ClockEntry(initialLimit, EffectiveFrequency, OnLimitReached, owner, localName, initialEnabled, initialDirection, initialWorkMode)
             { Value = initialDirection == Direction.Ascending ? 0 : initialLimit };
 
             clockSource.ExchangeClockEntryWith(OnLimitReached, x => clockEntry, () => clockEntry);
